@@ -52,7 +52,7 @@ NSString * const kOmnibarSearchProviders = @"SafariOmnibar_SearchProviders";
     if (searchURLTemplate)
     {
         searchTerms = searchTerms;
-        [locationField setStringValue:[searchURLTemplate stringByReplacingOccurrencesOfString:@"{searchTerms}" withString:searchTerms]];
+        [locationField setStringValue:[[searchURLTemplate stringByReplacingOccurrencesOfString:@"{searchTerms}" withString:searchTerms] stringByReplacingOccurrencesOfString:@"{searchTermsWithPlus}" withString:[searchTerms stringByReplacingOccurrencesOfString:@" " withString:@"+"]]];
     }
 
     [self SafariOmnibar_goToToolbarLocation:locationField];
