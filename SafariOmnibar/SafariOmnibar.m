@@ -13,6 +13,38 @@
 
 NSString * const kOmnibarSearchProviders = @"SafariOmnibar_SearchProviders";
 
+static BOOL is_search_query(NSString *string)
+{
+    // If it starts by a known scheme, don't try to validate the URL format, user certainly want to enter a URL.
+    // Even a bad one should shouldn't be treated as a search
+    if ([string hasPrefix:@"http://"] || [string hasPrefix:@"https://"] || [string hasPrefix:@"file://"])
+        return NO;
+
+    // If more than one word, it's certainly a search query
+    if ([string rangeOfString:@" "].location != NSNotFound)
+        return YES;
+
+    // Allow about:*, all other keyword:something should be treated as search query: think about site:mysite.com, define:word...
+    if ([string hasPrefix:@"about:"])
+        return NO;
+
+    NSURL *url = [NSURL URLWithString:[NSString stringWithFormat:@"http://%@", string]];
+
+    // A single word that can't be parsed as an URL is certainly a search query
+    if (!url)
+        return YES;
+
+    // Treat localhost specifically
+    if ([url.host isEqualToString:@"localhost"])
+        return NO;
+
+    // If the host part contains dot(s), treat the string as URL, the user certainly entered a URL manually with no scheme
+    if ([url.host rangeOfString:@"."].location != NSNotFound)
+        return NO;
+
+    return YES;
+}
+
 @implementation NSWindowController(SO)
 
 - (void)SafariOmnibar_goToToolbarLocation:(NSTextField *)locationField
@@ -28,26 +60,20 @@ NSString * const kOmnibarSearchProviders = @"SafariOmnibar_SearchProviders";
         // Custom search provider
         searchURLTemplate = [provider objectForKey:@"SearchURLTemplate"];
         NSUInteger colonLoc = [location rangeOfString:@":"].location;
-        searchTerms = [location substringWithRange:NSMakeRange(colonLoc + 2, location.length - (colonLoc + 2))];
+        if (colonLoc + 2 < location.length)
+        {
+            searchTerms = [location substringWithRange:NSMakeRange(colonLoc + 2, location.length - (colonLoc + 2))];
+        }
+        else
+        {
+            searchTerms = @"";
+        }
         [plugin resetSearchProviderForLocationField:locationField];
     }
-    else
+    else if (is_search_query(location))
     {
-        NSURL *url = [NSURL URLWithString:location];
-        if (url)
-        {
-            if (/* eg: host/path */ !url.scheme || /* eg: host:port or about:blank */ !url.host)
-            {
-                // User typed hostname/path or hostname:port without scheme, we automatically add default http scheme to ensure
-                // NSURL interprets the first part of the location as the host and not the path
-                url = [NSURL URLWithString:[NSString stringWithFormat:@"http://%@", location]];
-            }
-        }
-        if (!url || (![url.host isEqualToString:@"about"] && ![NSHost hostWithName:url.host].address))
-        {
-            // When location can't be parsed as URL or URL's host part can't be resolved, perform a search using the default search provider
-            searchURLTemplate = [[plugin defaultSearchProvider] objectForKey:@"SearchURLTemplate"];
-        }
+        // If we detect a search query with not search provider keyword, use the default search provider
+        searchURLTemplate = [[plugin defaultSearchProvider] objectForKey:@"SearchURLTemplate"];
     }
 
     if (searchURLTemplate)
@@ -57,6 +83,59 @@ NSString * const kOmnibarSearchProviders = @"SafariOmnibar_SearchProviders";
     }
 
     [self SafariOmnibar_goToToolbarLocation:locationField];
+}
+
+@end
+
+@implementation NSDocument(SO)
+
+- (NSTextField *)SafariOmnibar_locationField
+{
+    id windowController = nil;
+    if ([self respondsToSelector:@selector(browserWindowControllerMac)]) // Safari 5.1
+    {
+        windowController = [self performSelector:@selector(browserWindowControllerMac)];
+    }
+    else if ([self respondsToSelector:@selector(browserWindowController)]) // Safari 5.0
+    {
+        windowController = [self performSelector:@selector(browserWindowController)];
+    }
+    if (windowController)
+    {
+        if ([windowController respondsToSelector:@selector(locationField)])
+        {
+            return [windowController performSelector:@selector(locationField)];
+        }
+    }
+    return nil;
+}
+
+- (void)SafariOmnibar_searchWeb:(id)sender
+{
+    // This is the action behind Edit > Find > Find Google...
+    NSTextField *locationField = [self SafariOmnibar_locationField];
+    if (locationField)
+    {
+        // Force default search provider
+        [locationField setStringValue:@"?"];
+        [[SafariOmnibar sharedInstance] updateSearchProviderForLocationField:locationField];
+        // Focus location field
+        [locationField becomeFirstResponder];
+        // Move the caret at the end of the text's field
+        [(NSText *)[[locationField window] firstResponder] setSelectedRange:NSMakeRange(locationField.stringValue.length, 0)];
+    }
+}
+
+- (void)SafariOmnibar_openLocation:(id)sender
+{
+    // This is the action behind File > Open Location...
+    NSTextField *locationField = [self SafariOmnibar_locationField];
+    if (locationField)
+    {
+        // Mimic Chrome behavior by selecting the content of the location text field, ready to be replaced
+        [locationField selectText:nil];
+    }
+    [self SafariOmnibar_openLocation:sender];
 }
 
 @end
@@ -75,42 +154,7 @@ NSString * const kOmnibarSearchProviders = @"SafariOmnibar_SearchProviders";
 
 - (void)onLocationFieldChange:(NSNotification *)notification
 {
-    NSTextField *locationField = notification.object;
-    NSString *location = locationField.stringValue;
-    NSDictionary *provider = [self searchProviderForLocationField:locationField];
-
-    if (provider)
-    {
-        NSString *providerName = [provider objectForKey:@"Name"];
-        if (![location hasPrefix:[NSString stringWithFormat:@"%@: ", providerName]])
-        {
-            [self resetSearchProviderForLocationField:locationField];
-            NSUInteger colonLoc = [location rangeOfString:@":"].location;
-            if (colonLoc != NSNotFound)
-            {
-                location = [NSString stringWithFormat:@"%@%@",
-                            [provider objectForKey:@"Keyword"],
-                            [location substringWithRange:NSMakeRange(colonLoc + 1, location.length - (colonLoc + 1))]];
-                [locationField setStringValue:location];
-            }
-        }
-    }
-    else
-    {
-        NSUInteger firstSpaceLoc = [location rangeOfString:@" "].location;
-        if (firstSpaceLoc != NSNotFound && firstSpaceLoc > 0)
-        {
-            // Lookup for search provider keyword
-            NSString *firstWord = [[location substringWithRange:NSMakeRange(0, firstSpaceLoc)] lowercaseString];
-            NSDictionary *provider = [[SafariOmnibar sharedInstance] searchProviderForKeyword:firstWord];
-            if (provider)
-            {
-                NSString *terms = [location substringWithRange:NSMakeRange(firstSpaceLoc + 1, location.length - (firstSpaceLoc + 1))];
-                locationField.stringValue = [NSString stringWithFormat:@"%@: %@", [provider objectForKey:@"Name"], terms];
-                [barProviderMap setObject:provider forKey:[NSNumber numberWithInteger:locationField.hash]];
-            }
-        }
-    }
+    [self updateSearchProviderForLocationField:notification.object];
 }
 
 - (void)addContextMenuItemsToLocationField:(id)locationField
@@ -202,6 +246,66 @@ NSString * const kOmnibarSearchProviders = @"SafariOmnibar_SearchProviders";
     return nil;
 }
 
+- (void)updateSearchProviderForLocationField:(NSTextField *)locationField
+{
+    NSString *location = locationField.stringValue;
+    NSDictionary *provider = [self searchProviderForLocationField:locationField];
+
+    if (provider)
+    {
+        NSString *providerName = [provider objectForKey:@"Name"];
+        if (![location hasPrefix:[NSString stringWithFormat:@"%@: ", providerName]])
+        {
+            [self resetSearchProviderForLocationField:locationField];
+            NSUInteger colonLoc = [location rangeOfString:@":"].location;
+            if (colonLoc != NSNotFound)
+            {
+                location = [NSString stringWithFormat:@"%@%@",
+                            [provider objectForKey:@"Keyword"],
+                            [location substringWithRange:NSMakeRange(colonLoc + 1, location.length - (colonLoc + 1))]];
+                [locationField setStringValue:location];
+            }
+        }
+    }
+    else
+    {
+        NSDictionary *provider = nil;
+        NSString *terms = nil;
+
+        if ([location hasPrefix:@"?"])
+        {
+            // Force default search provider if location starts with "?"
+            terms = [location substringFromIndex:1];
+            provider = [[SafariOmnibar sharedInstance] defaultSearchProvider];
+        }
+        else
+        {
+            // Keyword custom search provider
+            NSUInteger firstSpaceLoc = [location rangeOfString:@" "].location;
+
+            if (firstSpaceLoc != NSNotFound && firstSpaceLoc > 0)
+            {
+                // Lookup for search provider keyword
+                NSString *firstWord = [[location substringWithRange:NSMakeRange(0, firstSpaceLoc)] lowercaseString];
+                provider = [[SafariOmnibar sharedInstance] searchProviderForKeyword:firstWord];
+                if (provider)
+                {
+                    // Remove the keyword from terms
+                    terms = [location substringFromIndex:firstSpaceLoc + 1];
+                }
+            }
+        }
+
+        if (provider)
+        {
+            // Add the provider name
+            locationField.stringValue = [NSString stringWithFormat:@"%@: %@", [provider objectForKey:@"Name"], terms];
+            // Save current provider for this field
+            [barProviderMap setObject:provider forKey:[NSNumber numberWithInteger:locationField.hash]];
+        }
+    }
+}
+
 - (NSDictionary *)searchProviderForLocationField:(NSTextField *)locationField
 {
     return [barProviderMap objectForKey:[NSNumber numberWithInteger:locationField.hash]];
@@ -263,6 +367,12 @@ NSString * const kOmnibarSearchProviders = @"SafariOmnibar_SearchProviders";
             [NSClassFromString(@"BrowserWindowController") jr_swizzleMethod:@selector(goToToolbarLocation:)
                                                                  withMethod:@selector(SafariOmnibar_goToToolbarLocation:) error:NULL];
         }
+
+        [NSClassFromString(@"BrowserDocument") jr_swizzleMethod:@selector(searchWeb:)
+                                                     withMethod:@selector(SafariOmnibar_searchWeb:) error:NULL];
+        [NSClassFromString(@"BrowserDocument") jr_swizzleMethod:@selector(openLocation:)
+                                                     withMethod:@selector(SafariOmnibar_openLocation:) error:NULL];
+
 
         [SparkleHelper initUpdater];
     }
