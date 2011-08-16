@@ -81,7 +81,7 @@ static BOOL is_search_query(NSString *string)
         // Save untouched search terms in this fields' context
         [plugin saveSearchQuery:searchTerms forLocationField:locationField];
         searchTerms = [searchTerms stringByReplacingOccurrencesOfString:@"+" withString:@"%2B"];
-        searchTerms = [provider objectForKey:@"SpaceAsPlus"] ? [searchTerms stringByReplacingOccurrencesOfString:@" " withString:@"+"] : [searchTerms stringByAddingPercentEscapesUsingEncoding:NSUTF8StringEncoding];
+        searchTerms = [[provider objectForKey:@"SpaceAsPlus"] boolValue] ? [searchTerms stringByReplacingOccurrencesOfString:@" " withString:@"+"] : [searchTerms stringByAddingPercentEscapesUsingEncoding:NSUTF8StringEncoding];
         // escape more
         searchTerms = [searchTerms stringByReplacingOccurrencesOfString:@"&" withString:@"%26"];
         [locationField setStringValue:[searchURLTemplate stringByReplacingOccurrencesOfString:@"{searchTerms}" withString:searchTerms]];
