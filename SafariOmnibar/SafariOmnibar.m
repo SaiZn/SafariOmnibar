@@ -80,12 +80,11 @@ static BOOL is_search_query(NSString *string)
     {
         // Save untouched search terms in this fields' context
         [plugin saveSearchQuery:searchTerms forLocationField:locationField];
-
-        searchTerms = [searchTerms stringByAddingPercentEscapesUsingEncoding:NSUTF8StringEncoding];
+        searchTerms = [searchTerms stringByReplacingOccurrencesOfString:@"+" withString:@"%2B"];
+        searchTerms = [provider objectForKey:@"SpaceAsPlus"] ? [searchTerms stringByReplacingOccurrencesOfString:@" " withString:@"+"] : [searchTerms stringByAddingPercentEscapesUsingEncoding:NSUTF8StringEncoding];
         // escape more
         searchTerms = [searchTerms stringByReplacingOccurrencesOfString:@"&" withString:@"%26"];
-        searchTerms = [searchTerms stringByReplacingOccurrencesOfString:@"+" withString:@"%2B"];
-        [locationField setStringValue:[[searchURLTemplate stringByReplacingOccurrencesOfString:@"{searchTerms}" withString:searchTerms] stringByReplacingOccurrencesOfString:@"{searchTermsWithPlus}" withString:[searchTerms stringByReplacingOccurrencesOfString:@" " withString:@"+"]]];
+        [locationField setStringValue:[searchURLTemplate stringByReplacingOccurrencesOfString:@"{searchTerms}" withString:searchTerms]];
     }
 
     [self SafariOmnibar_goToToolbarLocation:locationField];
