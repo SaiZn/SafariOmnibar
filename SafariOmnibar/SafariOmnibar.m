@@ -15,18 +15,18 @@ NSString * const kOmnibarSearchProviders = @"SafariOmnibar_SearchProviders";
 
 static BOOL is_search_query(NSString *string)
 {
+    // Clean the input
+    string = [string stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+
     // If it starts by a known scheme, don't try to validate the URL format, user certainly want to enter a URL.
     // Even a bad one should shouldn't be treated as a search
-    if ([string hasPrefix:@"http://"] || [string hasPrefix:@"https://"] || [string hasPrefix:@"file://"])
+    if ([string hasPrefix:@"http://"] || [string hasPrefix:@"https://"] || [string hasPrefix:@"file://"]
+        || [string hasPrefix:@"javascript:"] || [string hasPrefix:@"feed:"] || [string hasPrefix:@"about:"])
         return NO;
 
     // If more than one word, it's certainly a search query
     if ([string rangeOfString:@" "].location != NSNotFound)
         return YES;
-
-    // Allow about:*, all other keyword:something should be treated as search query: think about site:mysite.com, define:word...
-    if ([string hasPrefix:@"about:"])
-        return NO;
 
     NSURL *url = [NSURL URLWithString:[NSString stringWithFormat:@"http://%@", string]];
 
@@ -78,7 +78,13 @@ static BOOL is_search_query(NSString *string)
 
     if (searchURLTemplate)
     {
-        searchTerms = searchTerms;
+        // Save untouched search terms in this fields' context
+        [plugin saveSearchQuery:searchTerms forLocationField:locationField];
+
+        searchTerms = [searchTerms stringByAddingPercentEscapesUsingEncoding:NSUTF8StringEncoding];
+        // escape more
+        searchTerms = [searchTerms stringByReplacingOccurrencesOfString:@"&" withString:@"%26"];
+        searchTerms = [searchTerms stringByReplacingOccurrencesOfString:@"+" withString:@"%2B"];
         [locationField setStringValue:[[searchURLTemplate stringByReplacingOccurrencesOfString:@"{searchTerms}" withString:searchTerms] stringByReplacingOccurrencesOfString:@"{searchTermsWithPlus}" withString:[searchTerms stringByReplacingOccurrencesOfString:@" " withString:@"+"]]];
     }
 
@@ -110,15 +116,44 @@ static BOOL is_search_query(NSString *string)
     return nil;
 }
 
+- (BOOL)SafariOmnibar_restoreLastSearch:(NSTextField *)locationField forced:(BOOL)forced
+{
+    SafariOmnibar *plugin = [SafariOmnibar sharedInstance];
+
+    // If current location URL contains the last search (or forced is YES), replace the URL by the search so user can easily edit it
+    NSString *lastSearch = [plugin previousSearchQueryForLocationField:locationField];
+    if (lastSearch
+        && (forced || [[locationField.stringValue stringByReplacingPercentEscapesUsingEncoding:NSUTF8StringEncoding] rangeOfString:lastSearch].location != NSNotFound))
+    {
+        NSDictionary *provider = [plugin previousSearchProviderForLocationField:locationField];
+        if (provider)
+        {
+            // Add back the former search provider keyword
+            lastSearch = [NSString stringWithFormat:@"%@ %@", [provider objectForKey:@"Keyword"], lastSearch];
+            [plugin updateSearchProviderForLocationField:locationField];
+        }
+        if (lastSearch)
+        {
+            [locationField setStringValue:lastSearch];
+            return YES;
+        }
+    }
+
+    return NO;
+}
+
 - (void)SafariOmnibar_searchWeb:(id)sender
 {
     // This is the action behind Edit > Find > Find Google...
     NSTextField *locationField = [self SafariOmnibar_locationField];
     if (locationField)
     {
-        // Force default search provider
-        [locationField setStringValue:@"?"];
-        [[SafariOmnibar sharedInstance] updateSearchProviderForLocationField:locationField];
+        if (![self SafariOmnibar_restoreLastSearch:locationField forced:YES])
+        {
+            // Force default search provider
+            [locationField setStringValue:@"?"];
+            [[SafariOmnibar sharedInstance] updateSearchProviderForLocationField:locationField];
+        }
         // Focus location field
         [locationField becomeFirstResponder];
         // Move the caret at the end of the text's field
@@ -130,7 +165,7 @@ static BOOL is_search_query(NSString *string)
 {
     // This is the action behind File > Open Location...
     NSTextField *locationField = [self SafariOmnibar_locationField];
-    if (locationField)
+    if (locationField && ![self SafariOmnibar_restoreLastSearch:locationField forced:NO])
     {
         // Mimic Chrome behavior by selecting the content of the location text field, ready to be replaced
         [locationField selectText:nil];
@@ -151,6 +186,11 @@ static BOOL is_search_query(NSString *string)
 @synthesize defaultSearchProvider;
 @synthesize editSearchProvidersItem;
 @dynamic pluginVersion;
+
+- (NSMutableDictionary *)contextForLocationField:(NSTextField *)locationField
+{
+    return [locationFieldContext objectForKey:[NSNumber numberWithInteger:locationField.hash]];
+}
 
 - (void)onLocationFieldChange:(NSNotification *)notification
 {
@@ -184,7 +224,10 @@ static BOOL is_search_query(NSString *string)
     {
         [[windowController performSelector:@selector(searchField)] removeFromSuperview];
 
-        id locationField = [windowController performSelector:@selector(locationField)];
+        NSTextField *locationField = [windowController performSelector:@selector(locationField)];
+        // Init Omnibar context for this field
+        [locationFieldContext setObject:[NSMutableDictionary dictionary] forKey:[NSNumber numberWithInteger:locationField.hash]];
+
         [[NSNotificationCenter defaultCenter] addObserver:self
                                                  selector:@selector(onLocationFieldChange:)
                                                      name:@"NSControlTextDidChangeNotification"
@@ -301,20 +344,41 @@ static BOOL is_search_query(NSString *string)
             // Add the provider name
             locationField.stringValue = [NSString stringWithFormat:@"%@: %@", [provider objectForKey:@"Name"], terms];
             // Save current provider for this field
-            [barProviderMap setObject:provider forKey:[NSNumber numberWithInteger:locationField.hash]];
+            [[self contextForLocationField:locationField] setObject:provider forKey:@"provider"];
         }
     }
 }
 
 - (NSDictionary *)searchProviderForLocationField:(NSTextField *)locationField
 {
-    return [barProviderMap objectForKey:[NSNumber numberWithInteger:locationField.hash]];
+    return [[self contextForLocationField:locationField] objectForKey:@"provider"];
 }
 
 - (void)resetSearchProviderForLocationField:(NSTextField *)locationField
 {
-    [barProviderMap removeObjectForKey:[NSNumber numberWithInteger:locationField.hash]];
+    NSDictionary *lastProvider = [self searchProviderForLocationField:locationField];
+    if (lastProvider)
+    {
+        [[self contextForLocationField:locationField] removeObjectForKey:@"provider"];
+        [[self contextForLocationField:locationField] setObject:lastProvider forKey:@"last_provider"];
+    }
 }
+
+- (NSDictionary *)previousSearchProviderForLocationField:(NSTextField *)locationField
+{
+    return [[self contextForLocationField:locationField] objectForKey:@"last_provider"];
+}
+
+- (void)saveSearchQuery:(NSString *)searchQuery forLocationField:(NSTextField *)locationField
+{
+    [[self contextForLocationField:locationField] setObject:searchQuery forKey:@"last_search"];
+}
+
+- (NSString *)previousSearchQueryForLocationField:(NSTextField *)locationField
+{
+    return [[self contextForLocationField:locationField] objectForKey:@"last_search"];
+}
+
 
 - (void)editSearchProviders:(id)sender
 {
@@ -344,7 +408,7 @@ static BOOL is_search_query(NSString *string)
 {
     if ((self = [super init]))
     {
-        barProviderMap = [[NSMutableDictionary alloc] init];
+        locationFieldContext = [[NSMutableDictionary alloc] init];
         [self loadApplicationDefaults];
         [self loadSearchProviders];
 
@@ -383,7 +447,7 @@ static BOOL is_search_query(NSString *string)
 {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     [editSearchProvidersItem release], editSearchProvidersItem = nil;
-    [barProviderMap release], barProviderMap = nil;
+    [locationFieldContext release], locationFieldContext = nil;
     [defaultSearchProvider release], defaultSearchProvider = nil;
     [searchProviders release], searchProviders = nil;
     [super dealloc];
